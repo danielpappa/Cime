@@ -2,7 +2,7 @@
 #### Three Goals - Three Peaks - Daily. No More, no less! 
 
 <p align="center">
-<video src="docs/cime.mp4" width="600" autoplay loop muted playsinline></video>
+<img src="Cime/Resources/Assets.xcassets/AppIcon.appiconset/3.png" width="150" height="150" style="border-radius: 22px;" alt="App Icon">
 <br><br>
 <a>
 <img src="https://developer.apple.com/app-store/marketing/guidelines/images/badge-download-on-the-app-store.svg" alt="Download on the App Store" height="60">
