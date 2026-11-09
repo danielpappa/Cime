@@ -3,7 +3,6 @@ import Foundation
 import UIKit
 
 enum ProofValidator {
-    /// On-device stand-in for AI proof check (matches web `checkProof` in peaks.ts).
     static func checkProof(pixels: [UInt8], bytesPerPixel: Int = 4) -> (ok: Bool, reason: String?) {
         var sum = 0.0
         var sumSq = 0.0
