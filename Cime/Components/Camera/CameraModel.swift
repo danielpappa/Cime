@@ -13,7 +13,6 @@ final class CameraModel: NSObject {
     var mode: ProofKind = .photo
     var useFrontCamera = false
 
-    /// Session is configured on the main actor; start/stop runs on `CameraSessionQueue`.
     nonisolated(unsafe) let session = AVCaptureSession()
     private let photoOutput = AVCapturePhotoOutput()
     private let movieOutput = AVCaptureMovieFileOutput()
@@ -31,7 +30,7 @@ final class CameraModel: NSObject {
             errorMessage = "Camera access is needed — proof must be captured live."
             return
         }
-        if mode == .video || mode == .audio || mode == .loop {
+        if mode == .video || mode == .audio {
             guard audioGranted else {
                 errorMessage = "Microphone access is needed — proof must be recorded live."
                 return
@@ -64,9 +63,11 @@ final class CameraModel: NSObject {
     }
 
     private func capturePhoto() {
-        let settings = AVCapturePhotoSettings()
-        settings.flashMode = .off
-        photoOutput.capturePhoto(with: settings, delegate: self)
+        guard photoOutput.connection(with: .video) != nil else {
+            errorMessage = "Camera isn't ready yet."; return
+        }
+        isChecking = true
+        photoOutput.capturePhoto(with: AVCapturePhotoSettings(), delegate: self)
     }
 
     private func startRecording() {
@@ -113,7 +114,7 @@ final class CameraModel: NSObject {
                 session.addInput(input)
             }
         }
-        if mode == .video || mode == .audio || mode == .loop,
+        if mode == .video || mode == .audio,
            let mic = AVCaptureDevice.default(for: .audio),
            let input = try? AVCaptureDeviceInput(device: mic),
            session.canAddInput(input) {
@@ -142,56 +143,79 @@ final class CameraModel: NSObject {
         default: false
         }
     }
+    
+    struct PendingProof { let data: Data; let kind: ProofKind }
+    var pending: PendingProof?
 
     private func verifyAndDeliver(data: Data, kind: ProofKind, frameJPEG: Data?) {
         isChecking = true
         Task {
-            try? await Task.sleep(for: .milliseconds(900))
-            if kind == .photo || kind == .loop || kind == .video {
-                let checkData = frameJPEG ?? data
-                let result = ProofValidator.checkJPEG(checkData)
-                if !result.ok {
-                    errorMessage = result.reason
-                    isChecking = false
-                    return
-                }
+            try? await Task.sleep(for: .milliseconds(300))
+            if kind == .photo || kind == .video {
+                let result = ProofValidator.checkJPEG(frameJPEG ?? data)
+                if !result.ok { errorMessage = result.reason; isChecking = false; return }
             }
-            if kind == .audio, peakAudio < 10 {
-                errorMessage = "We couldn't hear anything. Say what you did."
-                isChecking = false
-                return
-            }
+            // (the audio peak check is gone, see the note at the top)
+            errorMessage = nil
             isChecking = false
-            onProof?(data, kind)
+            pending = PendingProof(data: data, kind: kind)      // was: onProof?(data, kind)
         }
     }
 
+    func confirm() {
+        guard let p = pending else { return }
+        pending = nil
+        onProof?(p.data, p.kind)          // the store uploads on its next sync, as before
+    }
+
+    func retake() {
+        pending = nil
+        errorMessage = nil
+    }
+    
     func stopSession() {
         recordingTimer?.invalidate()
         CameraSessionQueue.stopRunning(session)
     }
+    
+    private func processRecording(_ url: URL, error: Error?) async {
+        // AVFoundation reports e.g. "max duration reached" as an error on a perfectly good file
+        if let error, (error as NSError).userInfo[AVErrorRecordingSuccessfullyFinishedKey] as? Bool != true {
+            errorMessage = "Recording failed. Try again."
+            return
+        }
+        isChecking = true
+        let kind = mode
+        do {
+            let frame = kind == .video ? await ProofCompressor.firstFrameJPEG(url) : nil   // fixes validation
+            let data = try await ProofCompressor.compress(url, kind: kind)
+            verifyAndDeliver(data: data, kind: kind, frameJPEG: frame)
+        } catch {
+            errorMessage = "Couldn't process the recording."
+            isChecking = false
+        }
+    }
 }
 
 extension CameraModel: AVCapturePhotoCaptureDelegate {
-    nonisolated func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
-        guard error == nil, let data = photo.fileDataRepresentation() else { return }
+    nonisolated func photoOutput(_ output: AVCapturePhotoOutput,
+                                 didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
+        let data = photo.fileDataRepresentation()
         Task { @MainActor in
-            verifyAndDeliver(data: data, kind: .photo, frameJPEG: data)
+            // ~150–300 KB instead of 2–3 MB; also normalizes HEIC to JPEG
+            guard error == nil, let data, let small = data.jpegDownscaled(maxSide: 1080, quality: 0.8) else {
+                errorMessage = "Couldn't take the photo. Try again."
+                isChecking = false
+                return
+            }
+            verifyAndDeliver(data: small, kind: .photo, frameJPEG: small)
         }
     }
 }
 
 extension CameraModel: AVCaptureFileOutputRecordingDelegate {
-    nonisolated func fileOutput(
-        _ output: AVCaptureFileOutput,
-        didFinishRecordingTo outputFileURL: URL,
-        from connections: [AVCaptureConnection],
-        error: Error?
-    ) {
-        guard error == nil, let data = try? Data(contentsOf: outputFileURL) else { return }
-        Task { @MainActor in
-            let kind = mode
-            verifyAndDeliver(data: data, kind: kind, frameJPEG: nil)
-        }
+    nonisolated func fileOutput(_ output: AVCaptureFileOutput, didFinishRecordingTo url: URL,
+                                from connections: [AVCaptureConnection], error: Error?) {
+        Task { @MainActor in await processRecording(url, error: error) }
     }
 }

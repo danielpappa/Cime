@@ -14,9 +14,9 @@ struct ProofMediaView: View {
                 } else {
                     Theme.secondary
                 }
-            case .video, .loop:
+            case .video:
                 if let jpeg {
-                    LoopingVideoView(data: jpeg, muted: kind == .loop)
+                    VideoView(data: jpeg)
                 } else {
                     Theme.secondary
                 }
@@ -34,28 +34,16 @@ struct ProofMediaView: View {
     }
 }
 
-private struct LoopingVideoView: View {
+private struct VideoView: View {
     let data: Data
-    let muted: Bool
     @State private var player: AVPlayer?
 
     var body: some View {
         VideoPlayer(player: player)
             .onAppear {
-                let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".mov")
+                let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".mp4")
                 try? data.write(to: url)
                 let p = AVPlayer(url: url)
-                p.isMuted = muted
-                if muted {
-                    NotificationCenter.default.addObserver(
-                        forName: .AVPlayerItemDidPlayToEndTime,
-                        object: p.currentItem,
-                        queue: .main
-                    ) { _ in
-                        p.seek(to: .zero)
-                        p.play()
-                    }
-                }
                 player = p
                 p.play()
             }
