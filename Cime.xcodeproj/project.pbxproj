@@ -13,6 +13,7 @@
 		5FA24349308FBE6F00B55FAD /* Auth in Frameworks */ = {isa = PBXBuildFile; productRef = 5FA24348308FBE6F00B55FAD /* Auth */; };
 		5FA2434B308FBE6F00B55FAD /* Storage in Frameworks */ = {isa = PBXBuildFile; productRef = 5FA2434A308FBE6F00B55FAD /* Storage */; };
 		5FA2434D308FBE6F00B55FAD /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = 5FA2434C308FBE6F00B55FAD /* Supabase */; };
+		5FDC4DBD30A1BFBE004E1E68 /* README.md in Resources */ = {isa = PBXBuildFile; fileRef = 5FDC4DBC30A1BFBE004E1E68 /* README.md */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -45,6 +46,7 @@
 		5F6F8711309F94CF006E9879 /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
 		5F6F8726309F9506006E9879 /* CimeWidgetExtension.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = CimeWidgetExtension.entitlements; sourceTree = "<group>"; };
 		5FA242F4308FBE0C00B55FAD /* Cime.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Cime.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		5FDC4DBC30A1BFBE004E1E68 /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -136,6 +138,7 @@
 		5FA242EB308FBE0C00B55FAD = {
 			isa = PBXGroup;
 			children = (
+				5FDC4DBC30A1BFBE004E1E68 /* README.md */,
 				5F6F8726309F9506006E9879 /* CimeWidgetExtension.entitlements */,
 				5FA242F6308FBE0C00B55FAD /* Cime */,
 				5F6F8713309F94CF006E9879 /* CimeWidget */,
@@ -258,6 +261,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				5FDC4DBD30A1BFBE004E1E68 /* README.md in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
