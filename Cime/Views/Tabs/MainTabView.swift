@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct MainTabView: View {
-    @Environment(PeaksStore.self) private var store
+    @Environment(CimeStore.self) private var store
     @State private var tab: MainTab = .climb
     @State private var proveGoalIndex: Int?
     var body: some View {
@@ -41,14 +41,14 @@ struct MainTabView: View {
             .tag(MainTab.summits)
             
             NavigationStack {
-                CrewView()
+                DiscoverView()
                     .topoBackground()
                     .navigationDestination(for: AppRoute.self) { route in
                         routeDestination(for: route)
                     }
             }
             .tabItem {
-                Label("Crew", systemImage: "person.3.fill")
+                Label("Discover", systemImage: "binoculars.fill")
             }
             .tag(MainTab.crew)
             
@@ -68,18 +68,18 @@ struct MainTabView: View {
     }
 
     private var header: some View {
-        HStack(alignment: .bottom) {
+        HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(Date.now.formatted(.dateTime.weekday(.wide).day().month(.abbreviated)))
                     .monoCaps(10)
                     .foregroundStyle(Theme.glacier)
-                Text("Three Peaks")
+                Text("Climb")
                     .displayFont(36)
             }
             Spacer()
-            HStack(spacing: 8) {
+            HStack(spacing: 4) {
                 Text("▲ \(store.streakDisplay)")
-                    .monoCaps(11)
+                    .monoCaps(12)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 6)
                     .overlay(Capsule().stroke(Theme.border))
@@ -119,6 +119,8 @@ struct MainTabView: View {
     }
 }
 
+
 #Preview {
     MainTabView()
+        .environment(CimeStore())
 }
