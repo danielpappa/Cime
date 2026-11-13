@@ -11,12 +11,10 @@ import UIKit
 struct EdgeGlowCelebration: View {
     let trigger: Int
     var cornerRadius: CGFloat = 56          // Face ID iPhones are roughly 47–62; tune to taste
-    var message: String? = "Three peaks."   // nil = glow only, like Apple's
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var visible = false
     @State private var intensity = 0.0
-    @State private var textOpacity = 0.0
     @State private var running: Task<Void, Never>?
 
     // first == last so the angular gradient has no seam
@@ -31,13 +29,6 @@ struct EdgeGlowCelebration: View {
                 }
                 .opacity(intensity)
 
-                if let message {
-                    Text(message)
-                        .displayFont(34)
-                        .foregroundStyle(.white)
-                        .shadow(color: .black.opacity(0.4), radius: 12)
-                        .opacity(textOpacity)
-                }
             }
         }
         .ignoresSafeArea()
@@ -63,13 +54,33 @@ struct EdgeGlowCelebration: View {
     @MainActor private func play() async {
         try? await Task.sleep(for: .milliseconds(350))      // let the camera sheet finish dismissing
         guard !Task.isCancelled else { return }
-        visible = true; intensity = 0; textOpacity = 0
+        visible = true; intensity = 0
         UINotificationFeedbackGenerator().notificationOccurred(.success)
+        UIImpactFeedbackGenerator(style: .heavy).impactOccurred(intensity: 1.0)
         withAnimation(.easeOut(duration: 0.7)) { intensity = 1 }
-        withAnimation(.easeIn(duration: 0.5).delay(0.4)) { textOpacity = 1 }
         try? await Task.sleep(for: .seconds(2.6))
-        withAnimation(.easeInOut(duration: 1.0)) { intensity = 0; textOpacity = 0 }
         try? await Task.sleep(for: .seconds(1.1))
         visible = false
+    }
+}
+
+#Preview {
+    @Previewable @State var trigger = 0
+
+    ZStack {
+        // Use a dark background to make the edge glow pop
+        Color.black.ignoresSafeArea()
+
+        VStack {
+            Spacer()
+            Button("Trigger Celebration") {
+                trigger += 1
+            }
+            .buttonStyle(.borderedProminent)
+            .padding(.bottom, 50)
+        }
+
+        // The celebration view
+        EdgeGlowCelebration(trigger: trigger)
     }
 }

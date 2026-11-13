@@ -1,12 +1,13 @@
 import SwiftUI
-import AVKit
 
 struct SummitsView: View {
     @Environment(CimeStore.self) private var store
+    @State private var interactions = SummitInteractions()       // real reactions + comments
     @State private var showingAddFriends = false
     @State private var showingRequests = false
+    @State private var commentTarget: CommentTarget?
 
-    /// Your original header sat close under the toolbar via a negative inset; kept as a named value.
+    /// Your header sits close under the toolbar via a negative inset; kept as a named value.
     private let topPull: CGFloat = -38
 
     /// How many of MY peaks are reached. Friend slide N unlocks once I've reached N.
@@ -18,8 +19,7 @@ struct SummitsView: View {
         let posts: [FriendSummit]        // earliest -> latest, at most 3
     }
 
-    /// Cards are ordered by each friend's MOST RECENT summit (the feed arrives newest-first, so
-    /// first appearance = latest activity). Inside a card, summits run earliest -> latest.
+    /// Ordered by each friend's most recent summit (the feed arrives newest-first).
     private var groups: [FriendGroup] {
         var order: [UUID] = []
         var byUser: [UUID: [FriendSummit]] = [:]
@@ -31,6 +31,11 @@ struct SummitsView: View {
             guard let posts = byUser[id], let first = posts.first else { return nil }
             return FriendGroup(id: id, name: first.name, posts: Array(posts.reversed().suffix(3)))
         }
+    }
+
+    /// Every summit on screen: their counts get fetched together.
+    private var trackedIDs: [UUID] {
+        store.day.goals.filter(\.done).map(\.id) + groups.flatMap { $0.posts.map(\.id) }
     }
 
     private var emptyMessage: String {
@@ -47,8 +52,6 @@ struct SummitsView: View {
             VStack(alignment: .leading, spacing: 24) {
                 header
 
-                if !store.day.goals.isEmpty { ownCard }
-
                 if groups.isEmpty {
                     Text(emptyMessage)
                         .font(.subheadline)
@@ -58,19 +61,28 @@ struct SummitsView: View {
                         .padding(.top, 8)
                 }
 
-                ForEach(groups) { group in
-                    friendCard(group)
+                // Lazy: tall cards, and videos only start when a card is near the screen.
+                LazyVStack(spacing: 20) {
+                    if !store.day.goals.isEmpty {
+                        ownCard.padding(.horizontal, -SummitUI.bleed)
+                    }
+                    ForEach(groups) { group in
+                        friendCard(group).padding(.horizontal, -SummitUI.bleed)
+                    }
                 }
+                .scrollTargetLayout()
+                .animation(.snappy, value: groups.map(\.id))      // cards glide to the top on new summits
             }
             .padding(.horizontal, 24)
             .padding(.top, topPull)
             .padding(.bottom, 100)
-            .animation(.snappy, value: groups.map(\.id))      // cards glide to the top on new summits
         }
+        .scrollTargetBehavior(.viewAligned)                       // cards snap into place; delete to free-scroll
         .refreshable {
             if let id = store.userId { await store.fetchFollowing(userId: id) }
             await store.fetchIncomingRequests()
             await store.fetchFriendSummits()
+            await interactions.refresh()
         }
         .riseOnAppear()
         .toolbar {
@@ -97,6 +109,17 @@ struct SummitsView: View {
         }
         .sheet(isPresented: $showingAddFriends) { AddFriendsSearchView() }
         .sheet(isPresented: $showingRequests) { FollowRequestsView() }
+        .sheet(item: $commentTarget) { CommentsSheet(target: $0) }
+        .environment(interactions)          // keep this AFTER the sheets so they inherit it
+        .task {
+            interactions.bind(store)
+            await interactions.startRealtime()
+        }
+        .task(id: trackedIDs) {
+            interactions.bind(store)
+            await interactions.track(trackedIDs)
+        }
+        .onDisappear { Task { await interactions.stopRealtime() } }
     }
 
     // MARK: - Header
@@ -111,248 +134,59 @@ struct SummitsView: View {
         }
     }
 
-    // MARK: - Cards (own + friends share SummitCard, so they always look identical)
+    // MARK: - Cards (own + friends share SummitCard)
 
     private var ownCard: some View {
-        let slides = store.day.goals.prefix(3).map { goal in
+        let slides = store.day.goals.prefix(3).map { goal -> CardSlide in
             goal.done
                 ? CardSlide(
-                    id: goal.id.uuidString, caption: goal.text, isLocked: false,
+                    goalID: goal.id, caption: goal.text, isLocked: false,
                     content: .proof(.init(kind: goal.proofKind, jpeg: goal.proofJPEG, path: goal.proofPath)))
                 : CardSlide(
-                    id: goal.id.uuidString, caption: goal.text, isLocked: false,
+                    goalID: goal.id, caption: goal.text, isLocked: false,
                     content: .message(symbol: "mountain.2.fill", text: "Still climbing…"))
         }
         return SummitCard(
             name: "You",
             slides: Array(slides),
-            progress: "\(myUnlocked)/3",
             isOwn: true,
             avatar: AnyView(
                 AvatarView(jpeg: store.profile?.avatarJPEG,
                            url: store.profile?.avatarURL.flatMap(URL.init(string:)),
-                           letter: store.profile?.username ?? "you", size: 38)
-                    .overlay(Circle().stroke(Theme.border, lineWidth: 1))
-            )
+                           letter: store.profile?.username ?? "you", size: 40)
+            ),
+            onComments: { commentTarget = CommentTarget(slide: $0, isOwnPost: true) }
         )
     }
 
     private func friendCard(_ group: FriendGroup) -> some View {
-        // One slide per summit they've actually reached: nothing to wait for. A slide is
-        // locked only until I've reached as many peaks as its position (1st, 2nd, 3rd).
+        // One slide per summit they've reached. Locked slides keep their real media, blurred.
         let slides = group.posts.enumerated().map { index, post -> CardSlide in
             let locked = index >= myUnlocked
             return CardSlide(
-                id: post.id.uuidString,
+                goalID: post.id,
                 caption: locked ? "Summit locked" : post.goal,
                 isLocked: locked,
-                content: locked
-                    ? .message(symbol: "mountain.2.fill", text: "Reach peak \(index + 1) to unlock")
-                    : .proof(.init(kind: post.proofKind, url: post.proofURL, badge: post.time)))
+                lockHint: locked ? "Reach peak \(index + 1) to unlock" : nil,
+                content: .proof(.init(kind: post.proofKind, url: post.proofURL,
+                                      badge: post.time, blurred: locked)))
         }
         return SummitCard(
             name: group.name,
             slides: slides,
-            progress: "\(min(3, group.posts.count))/3",
             isOwn: false,
             avatar: AnyView(
                 ZStack {
-                    Circle().fill(Theme.glacier.opacity(0.2)).frame(width: 38, height: 38)
+                    Circle().fill(.ultraThinMaterial)
                     Text(group.name.prefix(1).uppercased())
                         .font(.headline)
-                        .foregroundStyle(Theme.glacier)
-                }
-                .overlay(Circle().stroke(Theme.border, lineWidth: 1))
-            )
-        )
-    }
-}
-
-// MARK: - Shared card
-
-private struct CardSlide: Identifiable {
-    struct Proof {
-        var kind: ProofKind?
-        var jpeg: Data?          // local capture (own, not yet re-downloaded)
-        var url: URL?            // already-signed URL (friends)
-        var path: String?        // storage path, resolved lazily (own, after relaunch)
-        var badge: String?       // e.g. "2h"
-    }
-    enum Content {
-        case proof(Proof)
-        case message(symbol: String, text: String)
-    }
-
-    let id: String
-    let caption: String          // shown under the name; follows the page you're on
-    let isLocked: Bool
-    let content: Content
-}
-
-private struct SummitCard: View {
-    let name: String
-    let slides: [CardSlide]
-    let progress: String
-    let isOwn: Bool
-    let avatar: AnyView
-
-    @State private var page = 0
-
-    private var current: CardSlide? { slides.indices.contains(page) ? slides[page] : slides.first }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            TabView(selection: $page) {
-                ForEach(Array(slides.enumerated()), id: \.element.id) { index, slide in
-                    SlideView(slide: slide).tag(index)
-                }
-            }
-            .tabViewStyle(.page(indexDisplayMode: slides.count > 1 ? .automatic : .never))
-            .frame(maxWidth: .infinity)
-            .frame(height: 380)
-
-            bar
-        }
-        .overlay(RoundedRectangle(cornerRadius: 16).stroke(Theme.border))
-        .clipShape(RoundedRectangle(cornerRadius: 16))
-    }
-
-    private var bar: some View {
-        HStack(spacing: 12) {
-            avatar
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(name).font(.headline).foregroundStyle(Theme.foreground)
-                Text(current?.caption ?? "")
-                    .font(.subheadline)
-                    .foregroundStyle(Theme.mutedForeground)
-                    .lineLimit(1)
-            }
-
-            Spacer()
-
-            Text(progress)
-                .monoCaps(10)
-                .foregroundStyle(Theme.mutedForeground)
-
-            if !isOwn {
-                HStack(spacing: 16) {
-                    Button { /* TODO reactions */ } label: {
-                        Image(systemName: "heart.fill").font(.system(size: 18))
-                    }
-                    Button { /* TODO comments */ } label: {
-                        Image(systemName: "bubble.right").font(.system(size: 18))
-                    }
-                }
-                .foregroundStyle((current?.isLocked ?? true) ? Theme.mutedForeground : Theme.foreground)
-                .disabled(current?.isLocked ?? true)
-                .opacity((current?.isLocked ?? true) ? 0.4 : 1)
-            }
-        }
-        .padding(16)
-        .background(Theme.card)
-    }
-}
-
-/// One page. Content, locked and placeholder states all fill the page edge to edge.
-private struct SlideView: View {
-    @Environment(CimeStore.self) private var store
-    let slide: CardSlide
-
-    @State private var resolvedURL: URL?
-    @State private var resolveFailed = false
-
-    /// Only slides that carry a storage path (no local data, no URL yet) need a signed URL.
-    private var pathToResolve: String? {
-        if case .proof(let p) = slide.content, p.jpeg == nil, p.url == nil { return p.path }
-        return nil
-    }
-
-    var body: some View {
-        Color.clear
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .overlay { content }
-            .overlay(alignment: .topTrailing) {
-                if case .proof(let p) = slide.content, let badge = p.badge {
-                    Text(badge)
-                        .monoCaps(10)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(.black.opacity(0.6))
                         .foregroundStyle(.white)
-                        .clipShape(Capsule())
-                        .padding(12)
                 }
-            }
-            .clipped()
-            .task(id: pathToResolve) {
-                guard let path = pathToResolve else { return }
-                resolvedURL = await store.proofURL(path: path)
-                resolveFailed = resolvedURL == nil
-            }
-    }
-
-    @ViewBuilder private var content: some View {
-        switch slide.content {
-        case .message(let symbol, let text):
-            message(symbol, text)
-        case .proof(let p):
-            proof(p)
-        }
-    }
-
-    @ViewBuilder private func proof(_ p: CardSlide.Proof) -> some View {
-        if let jpeg = p.jpeg {
-            ProofMediaView(jpeg: jpeg, kind: p.kind ?? .photo)          // local, instant
-        } else {
-            let url = p.url ?? resolvedURL
-            switch (p.kind, url) {
-            case (.video?, let url?):
-                FeedVideo(url: url)
-            case (.audio?, _):
-                message("waveform", "Voice note")
-            case (_, let url?):
-                AsyncImage(url: url) { phase in
-                    if let image = phase.image { image.resizable().scaledToFill() }
-                    else if phase.error != nil { message("exclamationmark.triangle", "Couldn't load") }
-                    else { ProgressView() }
-                }
-            default:
-                if p.path != nil && !resolveFailed { ProgressView() }
-                else { message("photo", "No proof yet") }
-            }
-        }
-    }
-
-    private func message(_ symbol: String, _ text: String) -> some View {
-        VStack(spacing: 12) {
-            Image(systemName: symbol)
-                .font(.system(size: 40))
-                .foregroundStyle(Theme.glacier)
-            Text(text)
-                .font(.subheadline.weight(.medium))
-                .foregroundStyle(Theme.mutedForeground)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 24)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Theme.card.opacity(0.5))
-    }
-}
-
-private struct FeedVideo: View {
-    let url: URL
-    @State private var player: AVPlayer?
-
-    var body: some View {
-        VideoPlayer(player: player)
-            .onAppear { player = AVPlayer(url: url) }
-            .onDisappear { player?.pause() }
-            // Only react to THIS player's item.
-            .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)) { note in
-                guard let item = note.object as? AVPlayerItem, item === player?.currentItem else { return }
-                player?.seek(to: .zero)
-            }
+                .frame(width: 40, height: 40)
+            ),
+            profileRoute: .person(group.name),                    // user icon -> their profile
+            onComments: { commentTarget = CommentTarget(slide: $0, isOwnPost: false) }
+        )
     }
 }
 
