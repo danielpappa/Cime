@@ -10,6 +10,10 @@ final class CameraModel: NSObject {
     var isRecording = false
     var recordingElapsed = 0
     var audioLevel: CGFloat = 0
+    private var audioRecorder: AVAudioRecorder?
+    private var audioURL: URL?
+    private var meterTimer: Timer?
+    private var voiceDuration: TimeInterval = 0
     var mode: ProofKind = .photo
     var useFrontCamera = false
 
@@ -71,6 +75,7 @@ final class CameraModel: NSObject {
     }
 
     private func startRecording() {
+        if mode == .audio { startVoiceRecording(); return }
         guard !movieOutput.isRecording else { return }
         peakAudio = 0
         recordingElapsed = 1
@@ -92,6 +97,7 @@ final class CameraModel: NSObject {
     }
 
     private func stopRecording() {
+        if mode == .audio { stopVoiceRecording(); return }
         guard movieOutput.isRecording else { return }
         movieOutput.stopRecording()
         recordingTimer?.invalidate()
@@ -102,6 +108,7 @@ final class CameraModel: NSObject {
     }
 
     private func rebuildSession() {
+        guard mode != .audio else { CameraSessionQueue.stopRunning(session); return }
         session.beginConfiguration()
         session.sessionPreset = .high
         for input in session.inputs { session.removeInput(input) }
@@ -114,7 +121,7 @@ final class CameraModel: NSObject {
                 session.addInput(input)
             }
         }
-        if mode == .video || mode == .audio,
+        if mode == .video,
            let mic = AVCaptureDevice.default(for: .audio),
            let input = try? AVCaptureDeviceInput(device: mic),
            session.canAddInput(input) {
@@ -155,7 +162,11 @@ final class CameraModel: NSObject {
                 let result = ProofValidator.checkJPEG(frameJPEG ?? data)
                 if !result.ok { errorMessage = result.reason; isChecking = false; return }
             }
-            // (the audio peak check is gone, see the note at the top)
+            if kind == .audio, peakAudio < 12 {          // 12 ≈ -44 dB; normal speech peaks at 40–70
+                errorMessage = "We couldn't hear anything. Say what you did."
+                isChecking = false
+                return
+            }
             errorMessage = nil
             isChecking = false
             pending = PendingProof(data: data, kind: kind)      // was: onProof?(data, kind)
@@ -176,6 +187,12 @@ final class CameraModel: NSObject {
     func stopSession() {
         recordingTimer?.invalidate()
         CameraSessionQueue.stopRunning(session)
+        meterTimer?.invalidate(); meterTimer = nil
+        if let url = audioURL {                     // abandon an unfinished voice note quietly
+            audioURL = nil
+            try? FileManager.default.removeItem(at: url)
+        }
+        audioRecorder?.stop()
     }
     
     private func processRecording(_ url: URL, error: Error?) async {
@@ -194,6 +211,80 @@ final class CameraModel: NSObject {
             errorMessage = "Couldn't process the recording."
             isChecking = false
         }
+    }
+    
+    private func startVoiceRecording() {
+        do {
+            let audioSession = AVAudioSession.sharedInstance()
+            try audioSession.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker])
+            try audioSession.setActive(true)
+
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".m4a")
+            let recorder = try AVAudioRecorder(url: url, settings: [
+                AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
+                AVSampleRateKey: 22_050,
+                AVNumberOfChannelsKey: 1,
+                AVEncoderBitRateKey: 48_000            // ~350 KB for 30 s
+            ])
+            recorder.delegate = self
+            recorder.isMeteringEnabled = true
+            guard recorder.record() else { errorMessage = "Couldn't start recording."; return }
+
+            audioRecorder = recorder
+            audioURL = url
+            peakAudio = 0
+            recordingElapsed = 0
+            isRecording = true
+            meterTimer?.invalidate()
+            meterTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
+                Task { @MainActor [weak self] in self?.tickVoice() }
+            }
+        } catch {
+            errorMessage = "Couldn't start recording."
+        }
+    }
+
+    private func tickVoice() {
+        guard let recorder = audioRecorder, recorder.isRecording else { return }
+        recorder.updateMeters()
+        let level = max(0, min(1, (recorder.averagePower(forChannel: 0) + 50) / 50))   // -50…0 dB → 0…1
+        audioLevel = CGFloat(level)                       // drives the meter bars
+        peakAudio = max(peakAudio, level * 100)           // peakAudio is a Float in your model
+        recordingElapsed = Int(recorder.currentTime)
+        if recordingElapsed >= mode.recordLimitSeconds { stopVoiceRecording() }
+    }
+
+    private func stopVoiceRecording() {
+        voiceDuration = audioRecorder?.currentTime ?? 0
+        meterTimer?.invalidate(); meterTimer = nil
+        audioRecorder?.stop()                             // calls the delegate below
+        isRecording = false
+        recordingElapsed = 0
+        audioLevel = 0
+    }
+
+    private func finishVoice(success: Bool) {
+        defer {
+            audioRecorder = nil
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        }
+        guard let url = audioURL else { return }
+        audioURL = nil
+        guard success, voiceDuration >= 1,
+              let data = try? Data(contentsOf: url) else {
+            errorMessage = voiceDuration < 1 ? "Too short. Say a bit more." : "Recording failed. Try again."
+            try? FileManager.default.removeItem(at: url)
+            return
+        }
+        try? FileManager.default.removeItem(at: url)
+        isChecking = true
+        verifyAndDeliver(data: data, kind: .audio, frameJPEG: nil)    // already AAC .m4a: no re-encode
+    }
+}
+
+extension CameraModel: AVAudioRecorderDelegate {
+    nonisolated func audioRecorderDidFinishRecording(_ recorder: AVAudioRecorder, successfully flag: Bool) {
+        Task { @MainActor in finishVoice(success: flag) }
     }
 }
 

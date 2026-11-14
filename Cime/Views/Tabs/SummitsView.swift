@@ -6,6 +6,8 @@ struct SummitsView: View {
     @State private var showingAddFriends = false
     @State private var showingRequests = false
     @State private var commentTarget: CommentTarget?
+    @State private var focusedID: String?
+    private let cardGap: CGFloat = 12
 
     /// Your header sits close under the toolbar via a negative inset; kept as a named value.
     private let topPull: CGFloat = -38
@@ -48,34 +50,48 @@ struct SummitsView: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                header
+        VStack(spacing: 0) {
+            header
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 24)
+                .padding(.top, topPull)
 
-                if groups.isEmpty {
-                    Text(emptyMessage)
-                        .font(.subheadline)
-                        .foregroundStyle(Theme.mutedForeground)
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: .infinity)
-                        .padding(.top, 8)
-                }
+            GeometryReader { geo in
+                ScrollView {
+                    if groups.isEmpty {
+                        Text(emptyMessage)
+                            .font(.subheadline).foregroundStyle(Theme.mutedForeground)
+                            .multilineTextAlignment(.center).frame(maxWidth: .infinity)
+                            .padding(.top, 8)
+                    }
 
-                // Lazy: tall cards, and videos only start when a card is near the screen.
-                LazyVStack(spacing: 20) {
-                    if !store.day.goals.isEmpty {
-                        ownCard.padding(.horizontal, -SummitUI.bleed)
+                    LazyVStack(spacing: cardGap) {
+                        if !store.day.goals.isEmpty {
+                            ownCard
+                                .padding(.horizontal, -SummitUI.bleed)
+                                .id("own")
+                                .focusOnTap(id: "own", focused: $focusedID)
+                                .focusCarousel()
+                        }
+                        ForEach(groups) { group in
+                            friendCard(group)
+                                .padding(.horizontal, -SummitUI.bleed)
+                                .id(group.id.uuidString)
+                                .focusOnTap(id: group.id.uuidString, focused: $focusedID)
+                                .focusCarousel()
+                            }
                     }
-                    ForEach(groups) { group in
-                        friendCard(group).padding(.horizontal, -SummitUI.bleed)
-                    }
+                    .scrollTargetLayout()
+                    .padding(.horizontal, 24)
+                    .animation(.snappy, value: groups.map(\.id))
                 }
-                .scrollTargetLayout()
-                .animation(.snappy, value: groups.map(\.id))      // cards glide to the top on new summits
+                // margins = the space left over, so a snapped card lands exactly in the middle
+                .contentMargins(.vertical, geo.size.height * (1 - SummitUI.heightFraction) / 2, for: .scrollContent)
+                .scrollPosition(id: $focusedID, anchor: .center)
+                .scrollTargetBehavior(.viewAligned(limitBehavior: .always))   // one card per swipe (iOS 17.4+)
+                .sensoryFeedback(.selection, trigger: focusedID)              // same tick as the horizontal swipe
+                .scrollIndicators(.hidden)
             }
-            .padding(.horizontal, 24)
-            .padding(.top, topPull)
-            .padding(.bottom, 100)
         }
         .scrollTargetBehavior(.viewAligned)                       // cards snap into place; delete to free-scroll
         .refreshable {
@@ -85,6 +101,11 @@ struct SummitsView: View {
             await interactions.refresh()
         }
         .riseOnAppear()
+        .onAppear {
+            if focusedID == nil {
+                focusedID = store.day.goals.isEmpty ? groups.first?.id.uuidString : "own"
+            }
+        }
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
                 Button { showingRequests = true } label: {

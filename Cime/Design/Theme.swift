@@ -21,6 +21,7 @@ enum Theme {
 struct TopoBackground: ViewModifier {
     func body(content: Content) -> some View {
         content
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background {
                 ZStack {
                     Theme.background

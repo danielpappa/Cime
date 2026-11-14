@@ -11,12 +11,11 @@ import AVKit
 // MARK: - Tunables
 
 enum SummitUI {
-    /// Card height as a share of the visible scroll area. 0.84 is almost the whole screen.
-    static let heightFraction: CGFloat = 0.84
+    static let heightFraction: CGFloat = 0.78     // Card height as a share of the visible scroll area.
     static let corner: CGFloat = 28
     static let bleed: CGFloat = 12                // cards extend this far into the 24 pt page margin
     static let blurRadius: CGFloat = 32           // locked summits
-    static let emojis = ["❤️", "🔥", "💪", "🏔️", "👏"]
+    static let emojis = ["❤️", "🔥", "💪", "🏔️", "🧢", "🤌"]
 }
 
 // MARK: - Model
@@ -288,6 +287,28 @@ struct SummitCard: View {
     }
 }
 
+extension View {
+    /// Focused card at full size; cards that are only partly in view shrink toward it and dim.
+    func focusCarousel() -> some View {
+        scrollTransition(axis: .vertical) { content, phase in
+            content
+                .scaleEffect(1 - 0.14 * abs(phase.value), anchor: phase.value < 0 ? .bottom : .top)
+                .opacity(1 - 0.45 * abs(phase.value))
+        }
+    }
+    
+    /// Tapping a card that isn't focused scrolls to it. The focused card keeps its buttons.
+    func focusOnTap(id: String, focused: Binding<String?>) -> some View {
+        overlay {
+            if let current = focused.wrappedValue, current != id {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .onTapGesture { withAnimation(.snappy) { focused.wrappedValue = id } }
+            }
+        }
+    }
+}
+
 // MARK: - Three dots, top right: one per peak. Brighter = reached, big = current page.
 
 private struct PageDots: View {
@@ -395,8 +416,8 @@ private struct SlideView: View {
             FeedVideo(url: url, playing: !p.blurred)
                 .blur(radius: p.blurred ? SummitUI.blurRadius : 0)
                 .scaleEffect(p.blurred ? 1.2 : 1)           // hides the soft edges a blur leaves
-        case (.audio?, _):
-            message("waveform", p.blurred ? "" : "Voice note")
+        case (.audio?, let url?) where !p.blurred: AudioSlide(url: url)
+        case (.audio?, _): message("waveform", "")
         case (_, let url?):
             AsyncImage(url: url) { phase in
                 if let image = phase.image {
@@ -429,6 +450,36 @@ private struct SlideView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+private struct AudioSlide: View {
+    let url: URL
+    @State private var player: AVPlayer?
+    @State private var playing = false
+
+    var body: some View {
+        VStack(spacing: 14) {
+            Button(action: toggle) {
+                Image(systemName: playing ? "pause.circle.fill" : "play.circle.fill")
+                    .font(.system(size: 76)).foregroundStyle(Theme.summit)
+            }
+            Text("Voice note").font(.subheadline.weight(.medium)).foregroundStyle(Theme.mutedForeground)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onDisappear { player?.pause(); playing = false }
+        .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)) { note in
+            guard let item = note.object as? AVPlayerItem, item === player?.currentItem else { return }
+            playing = false
+            player?.seek(to: .zero)
+        }
+    }
+
+    private func toggle() {
+        try? AVAudioSession.sharedInstance().setCategory(.playback)    // audible even on silent
+        if player == nil { player = AVPlayer(url: url) }
+        if playing { player?.pause() } else { player?.play() }
+        playing.toggle()
     }
 }
 
