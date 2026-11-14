@@ -40,8 +40,13 @@ struct LiveCameraView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 16))
 
                     if let p = model.pending {
-                        ProofMediaView(jpeg: p.data, kind: p.kind)
-                            .clipShape(RoundedRectangle(cornerRadius: 16))
+                        Group {
+                            if p.kind == .audio { LocalAudioSlide(data: p.data, autoplay: true) }   // plays back right away
+                            else { ProofMediaView(jpeg: p.data, kind: p.kind) }
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(Theme.card)
+                        .clipShape(RoundedRectangle(cornerRadius: 16))
                     }
                     
                     if model.isChecking {
@@ -179,26 +184,27 @@ struct LiveCameraView: View {
     }
 
     private var audioMeter: some View {
-        VStack(spacing: 24) {
-            HStack(alignment: .bottom, spacing: 6) {
-                ForEach(0..<12, id: \.self) { i in
-                    RoundedRectangle(cornerRadius: 4)
-                        .fill(Theme.summit)
-                        .frame(width: 12, height: barHeight(index: i))
+        TimelineView(.animation) { timeline in
+            let t = timeline.date.timeIntervalSinceReferenceDate
+            VStack(spacing: 24) {
+                HStack(alignment: .bottom, spacing: 6) {
+                    ForEach(0..<12, id: \.self) { i in
+                        let wave = 0.5 + 0.5 * abs(sin(t * 6 + Double(i) * 0.7))
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(Theme.summit)
+                            .frame(width: 12,
+                                   height: 10 + (model.isRecording ? CGFloat(model.audioLevel) * 90 * wave : 0))
+                    }
                 }
-            }
-            .frame(height: 96)
-            Text(model.isRecording ? "Recording… tap to finish" : "Tap to record a voice note about what you did")
-                .font(.subheadline)
-                .foregroundStyle(Theme.mutedForeground)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 24)
-        }
-    }
+                .frame(height: 100)
 
-    private func barHeight(index: Int) -> CGFloat {
-        let wave = abs(sin(Double(index) * 1.7 + Double(model.recordingElapsed)))
-        return 10 + CGFloat(model.audioLevel) * 90 * (0.5 + wave)
+                Text(model.isRecording ? "Recording… tap to finish" : "Tap to record a voice note about what you did")
+                    .font(.subheadline)
+                    .foregroundStyle(Theme.mutedForeground)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 24)
+            }
+        }
     }
 }
 

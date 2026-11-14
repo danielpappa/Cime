@@ -15,7 +15,7 @@ enum SummitUI {
     static let corner: CGFloat = 28
     static let bleed: CGFloat = 12                // cards extend this far into the 24 pt page margin
     static let blurRadius: CGFloat = 32           // locked summits
-    static let emojis = ["❤️", "🔥", "💪", "🏔️", "🧢", "🤌"]
+    static let emojis = ["❤️", "🔥", "🏔️", "🧢", "🤌"]
 }
 
 // MARK: - Model
@@ -287,6 +287,62 @@ struct SummitCard: View {
     }
 }
 
+struct AudioSlide: View {
+    let url: URL
+    var autoplay = false
+    @State private var player: AVPlayer?
+    @State private var playing = false
+
+    var body: some View {
+        VStack(spacing: 14) {
+            Button(action: toggle) {
+                Image(systemName: playing ? "pause.circle.fill" : "play.circle.fill")
+                    .font(.system(size: 76)).foregroundStyle(Theme.summit)
+            }
+            .buttonStyle(.plain)
+            Text("Voice note").font(.subheadline.weight(.medium)).foregroundStyle(Theme.mutedForeground)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onAppear { if autoplay { toggle() } }
+        .onDisappear { player?.pause(); playing = false }
+        .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)) { note in
+            guard let item = note.object as? AVPlayerItem, item === player?.currentItem else { return }
+            playing = false
+            player?.seek(to: .zero)
+        }
+    }
+
+    private func toggle() {
+        Task.detached {
+            let audio = AVAudioSession.sharedInstance()
+            try? audio.setCategory(.playback, mode: .default)        // audible even on silent
+            try? audio.setActive(true)
+        }
+            
+        if player == nil { player = AVPlayer(url: url) }
+        if playing { player?.pause() } else { player?.play() }
+        playing.toggle()
+    }
+}
+
+/// Same player for audio you just recorded (raw data, no URL yet).
+struct LocalAudioSlide: View {
+    let data: Data
+    var autoplay = false
+    @State private var url: URL?
+
+    var body: some View {
+        Group {
+            if let url { AudioSlide(url: url, autoplay: autoplay) } else { ProgressView() }
+        }
+        .task {
+            let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".m4a")
+            try? data.write(to: tmp)
+            url = tmp
+        }
+    }
+}
+
 extension View {
     /// Focused card at full size; cards that are only partly in view shrink toward it and dim.
     func focusCarousel() -> some View {
@@ -405,7 +461,7 @@ private struct SlideView: View {
         case .video:
             LocalVideo(data: data)
         case .audio:
-            ProofMediaView(jpeg: data, kind: .audio)
+            LocalAudioSlide(data: data)
         }
     }
 
@@ -453,35 +509,6 @@ private struct SlideView: View {
     }
 }
 
-private struct AudioSlide: View {
-    let url: URL
-    @State private var player: AVPlayer?
-    @State private var playing = false
-
-    var body: some View {
-        VStack(spacing: 14) {
-            Button(action: toggle) {
-                Image(systemName: playing ? "pause.circle.fill" : "play.circle.fill")
-                    .font(.system(size: 76)).foregroundStyle(Theme.summit)
-            }
-            Text("Voice note").font(.subheadline.weight(.medium)).foregroundStyle(Theme.mutedForeground)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .onDisappear { player?.pause(); playing = false }
-        .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)) { note in
-            guard let item = note.object as? AVPlayerItem, item === player?.currentItem else { return }
-            playing = false
-            player?.seek(to: .zero)
-        }
-    }
-
-    private func toggle() {
-        try? AVAudioSession.sharedInstance().setCategory(.playback)    // audible even on silent
-        if player == nil { player = AVPlayer(url: url) }
-        if playing { player?.pause() } else { player?.play() }
-        playing.toggle()
-    }
-}
 
 // MARK: - Video that fills the card (VideoPlayer letterboxes and leaves side strips)
 
@@ -509,23 +536,77 @@ private struct FeedVideo: View {
     let url: URL
     var playing = true
     @State private var player: AVPlayer?
+    @State private var isMuted = true
+    @State private var showMuteIndicator = false
+    @State private var indicatorTask: Task<Void, Never>?
 
     var body: some View {
-        FillPlayerView(player: player)
-            .onAppear {
-                let p = AVPlayer(url: url)
-                p.isMuted = true
-                p.actionAtItemEnd = .none
-                player = p
-                if playing { p.play() }
+        ZStack {
+            FillPlayerView(player: player)
+                .ignoresSafeArea()
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    isMuted.toggle()
+                    player?.isMuted = isMuted
+                    
+                    if !isMuted {
+                        setupAudioSession()
+                    }
+                    
+                    // Briefly flash the mute status icon top-right
+                    showMuteIndicator = true
+                    indicatorTask?.cancel()
+                    indicatorTask = Task {
+                        try? await Task.sleep(for: .seconds(1.0))
+                        if !Task.isCancelled {
+                            showMuteIndicator = false
+                        }
+                    }
+                }
+            // Small indicator top-right aligned with the page dots container position
+            if showMuteIndicator {
+                VStack {
+                    HStack {
+                        Image(systemName: isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
+                            .background(.ultraThinMaterial, in: Capsule())
+                            .padding(14)
+                            .transition(.opacity.combined(with: .scale(scale: 0.8)))
+                        Spacer()
+                    }
+                    Spacer()
+                }
+                .allowsHitTesting(false)
             }
-            .onDisappear { player?.pause() }
-            .onChange(of: playing) { _, on in on ? player?.play() : player?.pause() }
-            .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)) { note in
-                guard let item = note.object as? AVPlayerItem, item === player?.currentItem else { return }
-                player?.seek(to: .zero)
-                if playing { player?.play() }
-            }
+        }
+        .onAppear {
+            let p = AVPlayer(url: url)
+            p.isMuted = isMuted
+            p.actionAtItemEnd = .none
+            player = p
+            if playing { p.play() }
+        }
+        .onDisappear {
+            player?.pause()
+            indicatorTask?.cancel()
+        }
+        .onChange(of: playing) { _, on in on ? player?.play() : player?.pause() }
+        .onReceive(NotificationCenter.default.publisher(for: .AVPlayerItemDidPlayToEndTime)) { note in
+            guard let item = note.object as? AVPlayerItem, item === player?.currentItem else { return }
+            player?.seek(to: .zero)
+            if playing { player?.play() }
+        }
+    }
+    
+    private func setupAudioSession() {
+        Task.detached {
+            let audio = AVAudioSession.sharedInstance()
+            try? audio.setCategory(.playback, mode: .default)
+            try? audio.setActive(true)
+        }
     }
 }
 

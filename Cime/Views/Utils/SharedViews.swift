@@ -49,8 +49,8 @@ struct ProofThumb: View {
                 }
             } else {
                 ZStack {
-                    Theme.secondary
-                    Image(systemName: icon).foregroundStyle(Theme.mutedForeground)
+                    Theme.primary.opacity(0.5)
+                    Image(systemName: icon).resizable().scaledToFit().padding(12).foregroundStyle(Theme.mutedForeground)
                 }
             }
         }
