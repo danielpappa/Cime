@@ -707,16 +707,11 @@ final class CimeStore {
         }
     }
 
-    /// Anonymous Discover. Empty query = recommendations from your own goal keywords
-    /// (or just the latest public summits if you have none).
-    func searchSummits(query: String) async -> [Summit] {
-        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
-        let terms = q.isEmpty ? userInterestKeywords : [q]
+    func discoverSummits(terms: [String]) async -> [Summit] {
         do {
             let rows: [DiscoverRow] = try await client
-                .rpc("discover_summits", params: DiscoverParams(terms: terms, limit: 40))
+                .rpc("discover_summits", params: DiscoverParams(terms: terms, limit: 60, day: Self.todayKey()))
                 .execute().value
-
             let rel = RelativeDateTimeFormatter()
             rel.unitsStyle = .short
             return rows.map { r in

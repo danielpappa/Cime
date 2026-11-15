@@ -180,9 +180,9 @@ struct StatsRow: Decodable {
 struct DiscoverParams: Encodable {
     let terms: [String]
     let limit: Int
+    let day: String
     enum CodingKeys: String, CodingKey {
-        case terms = "p_terms"
-        case limit = "p_limit"
+        case terms = "p_terms", limit = "p_limit", day = "p_day"
     }
 }
 
