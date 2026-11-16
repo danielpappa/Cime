@@ -58,13 +58,6 @@ struct SummitsView: View {
 
             GeometryReader { geo in
                 ScrollView {
-                    if groups.isEmpty {
-                        Text(emptyMessage)
-                            .font(.subheadline).foregroundStyle(Theme.mutedForeground)
-                            .multilineTextAlignment(.center).frame(maxWidth: .infinity)
-                            .padding(.top, 8)
-                    }
-
                     LazyVStack(spacing: cardGap) {
                         if !store.day.goals.isEmpty {
                             ownCard
@@ -73,13 +66,20 @@ struct SummitsView: View {
                                 .focusOnTap(id: "own", focused: $focusedID)
                                 .focusCarousel()
                         }
-                        ForEach(groups) { group in
-                            friendCard(group)
-                                .padding(.horizontal, -SummitUI.bleed)
-                                .id(group.id.uuidString)
-                                .focusOnTap(id: group.id.uuidString, focused: $focusedID)
-                                .focusCarousel()
+                        if groups.isEmpty {
+                            Text(emptyMessage)
+                                .font(.subheadline).foregroundStyle(Theme.mutedForeground)
+                                .multilineTextAlignment(.center).frame(maxWidth: .infinity)
+                                .padding(.top, 8)
+                        } else {
+                            ForEach(groups) { group in
+                                friendCard(group)
+                                    .padding(.horizontal, -SummitUI.bleed)
+                                    .id(group.id.uuidString)
+                                    .focusOnTap(id: group.id.uuidString, focused: $focusedID)
+                                    .focusCarousel()
                             }
+                        }
                     }
                     .scrollTargetLayout()
                     .padding(.horizontal, 24)
