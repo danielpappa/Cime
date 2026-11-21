@@ -1,10 +1,3 @@
-//
-//  SummitInteractions.swift
-//  Cime
-//
-//  Created by Daniel Pappalardo on 13/11/2026.
-//
-
 import SwiftUI
 import Supabase
 import OSLog

@@ -1,9 +1,15 @@
 import SwiftUI
 
+/// Root tab container for authenticated users, providing an independent
+/// `NavigationStack` and shared `AppRoute` handling per tab
 struct MainTabView: View {
+    
     @Environment(CimeStore.self) private var store
+    
     @State private var tab: MainTab = .climb
+    /// Index of the daily goal currently being verified via the live camera cover
     @State private var proveGoalIndex: Int?
+    
     var body: some View {
         TabView(selection: $tab) {
             NavigationStack {

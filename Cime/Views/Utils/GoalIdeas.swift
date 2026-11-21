@@ -1,10 +1,3 @@
-//
-//  GoalIdeasa.swift
-//  Cime
-//
-//  Created by Daniel Pappalardo on 15/11/2026.
-//
-
 import SwiftUI
 
 // MARK: - Context (season, hemisphere, time of day, locale)

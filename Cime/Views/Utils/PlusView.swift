@@ -1,10 +1,3 @@
-//
-//  PlusView.swift
-//  Cime
-//
-//  Created by Daniel Pappalardo on 03/11/2026.
-//
-
 import Foundation
 import Supabase
 

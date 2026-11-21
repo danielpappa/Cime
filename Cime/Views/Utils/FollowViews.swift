@@ -1,10 +1,3 @@
-//
-//  FollowViews.swift
-//  Cime
-//
-//  Created by Daniel Pappalardo on 03/11/2026.
-//
-
 import SwiftUI
 
 /// One button for all three states: Follow -> Requested -> Roped in.

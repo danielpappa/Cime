@@ -1,10 +1,3 @@
-//
-//  SplashView.swift
-//  Cime
-//
-//  Created by Daniel Pappalardo on 31/10/2026.
-//
-
 import Foundation
 import SwiftUI
 
