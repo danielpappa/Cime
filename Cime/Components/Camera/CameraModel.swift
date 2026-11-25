@@ -2,21 +2,25 @@ import AVFoundation
 import Observation
 import UIKit
 
+/// Manages camera, microphone, and voice note capturing for proving daily climbing goals
 @MainActor
 @Observable
 final class CameraModel: NSObject {
-    var errorMessage: String?
-    var isChecking = false
-    var isRecording = false
-    var recordingElapsed = 0
-    var audioLevel: CGFloat = 0
+    var errorMessage: String?                       // user facing validation/error message
+    var isChecking = false                          // true while media is being compressed, validated or checked
+    var isRecording = false                         // true when actively recording audio or video
+    var recordingElapsed = 0                        // elapsed recording time in seconds
+    var audioLevel: CGFloat = 0                     // normalized microphone level
+    
     private var audioRecorder: AVAudioRecorder?
     private var audioURL: URL?
     private var meterTimer: Timer?
     private var voiceDuration: TimeInterval = 0
+    
     var mode: ProofKind = .photo
     var useFrontCamera = false
 
+    /// Underlying capture session accessed from `CameraSessionQueue`
     nonisolated(unsafe) let session = AVCaptureSession()
     private let photoOutput = AVCapturePhotoOutput()
     private let movieOutput = AVCaptureMovieFileOutput()
@@ -26,7 +30,17 @@ final class CameraModel: NSObject {
     private var recordingTimer: Timer?
     private var peakAudio: Float = 0
     private var onProof: ((Data, ProofKind) -> Void)?
+    
+    /// Captured proof waiting for confirmation before saving
+    struct PendingProof {
+        let data: Data
+        let kind: ProofKind
+    }
 
+    /// Proof ready to confirm or retake
+    var pending: PendingProof?
+
+    /// Permission requests for camera and mic
     func configure() async {
         let videoGranted = await Self.requestAccess(for: .video)
         let audioGranted = await Self.requestAccess(for: .audio)
@@ -43,20 +57,24 @@ final class CameraModel: NSObject {
         rebuildSession()
     }
 
+    /// Switches capture mode
     func setMode(_ mode: ProofKind) {
         self.mode = mode
         Task { await configure() }
     }
 
+    /// Toggles between front and back camera
     func flipCamera() {
         useFrontCamera.toggle()
         rebuildSession()
     }
 
+    /// Registers the callback invoked when the user confirms a captured proof
     func bind(onProof: @escaping (Data, ProofKind) -> Void) {
         self.onProof = onProof
     }
 
+    /// Takes a photo or starts/stops recording depending on the current `mode`
     func captureOrToggleRecord() {
         switch mode {
         case .photo:
@@ -64,6 +82,37 @@ final class CameraModel: NSObject {
         default:
             isRecording ? stopRecording() : startRecording()
         }
+    }
+    
+    /// Confirms `pending` proof
+    func confirm() {
+        guard let p = pending else { return }
+        pending = nil
+        onProof?(p.data, p.kind)          // the store uploads on its next sync
+    }
+
+    /// Clears pending proof and error state so the user can capture again
+    func retake() {
+        pending = nil
+        errorMessage = nil
+    }
+
+    /// Stops sessions and cleans up files
+    func stopSession() {
+        stopTimers()
+        CameraSessionQueue.stopRunning(session)
+        if let url = audioURL {                     // abandon an unfinished voice note quietly
+            audioURL = nil
+            try? FileManager.default.removeItem(at: url)
+        }
+        audioRecorder?.stop()
+    }
+
+    private func stopTimers() {
+        recordingTimer?.invalidate()
+        recordingTimer = nil
+        meterTimer?.invalidate()
+        meterTimer = nil
     }
 
     private func capturePhoto() {
@@ -150,9 +199,6 @@ final class CameraModel: NSObject {
         default: false
         }
     }
-    
-    struct PendingProof { let data: Data; let kind: ProofKind }
-    var pending: PendingProof?
 
     private func verifyAndDeliver(data: Data, kind: ProofKind, frameJPEG: Data?) {
         isChecking = true
@@ -169,34 +215,11 @@ final class CameraModel: NSObject {
             }
             errorMessage = nil
             isChecking = false
-            pending = PendingProof(data: data, kind: kind)      // was: onProof?(data, kind)
+            pending = PendingProof(data: data, kind: kind)
         }
-    }
-
-    func confirm() {
-        guard let p = pending else { return }
-        pending = nil
-        onProof?(p.data, p.kind)          // the store uploads on its next sync, as before
-    }
-
-    func retake() {
-        pending = nil
-        errorMessage = nil
-    }
-    
-    func stopSession() {
-        recordingTimer?.invalidate()
-        CameraSessionQueue.stopRunning(session)
-        meterTimer?.invalidate(); meterTimer = nil
-        if let url = audioURL {                     // abandon an unfinished voice note quietly
-            audioURL = nil
-            try? FileManager.default.removeItem(at: url)
-        }
-        audioRecorder?.stop()
     }
     
     private func processRecording(_ url: URL, error: Error?) async {
-        // AVFoundation reports e.g. "max duration reached" as an error on a perfectly good file
         if let error, (error as NSError).userInfo[AVErrorRecordingSuccessfullyFinishedKey] as? Bool != true {
             errorMessage = "Recording failed. Try again."
             return
@@ -249,7 +272,7 @@ final class CameraModel: NSObject {
         recorder.updateMeters()
         let level = max(0, min(1, (recorder.averagePower(forChannel: 0) + 50) / 50))   // -50…0 dB → 0…1
         audioLevel = CGFloat(level)                       // drives the meter bars
-        peakAudio = max(peakAudio, level * 100)           // peakAudio is a Float in your model
+        peakAudio = max(peakAudio, level * 100)
         recordingElapsed = Int(recorder.currentTime)
         if recordingElapsed >= mode.recordLimitSeconds { stopVoiceRecording() }
     }
