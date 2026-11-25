@@ -73,6 +73,7 @@ struct MainTabView: View {
         .tint(Theme.primary)
     }
 
+    /// Top header displaying the formatted current date, screen title, and streak badge
     private var header: some View {
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 4) {
@@ -95,6 +96,7 @@ struct MainTabView: View {
         .padding(.top, 16)
     }
 
+    /// Resolves an ``AppRoute`` into its destination view
     @ViewBuilder
     private func routeDestination(for route: AppRoute) -> some View {
         switch route {
@@ -105,6 +107,7 @@ struct MainTabView: View {
         }
     }
 
+    /// Presents ``LiveCameraView`` for the goal selected in `proveGoalIndex` and saves proof upon completion.
     @ViewBuilder
     private var proveGoalView: some View {
         if let index = proveGoalIndex, store.day.goals.indices.contains(index) {

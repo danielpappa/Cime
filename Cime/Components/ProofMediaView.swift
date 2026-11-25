@@ -1,6 +1,7 @@
 import AVKit
 import SwiftUI
 
+/// Renders proof media (photo, video, or audio) from raw bytes.
 struct ProofMediaView: View {
     let jpeg: Data?
     let kind: ProofKind
@@ -16,7 +17,7 @@ struct ProofMediaView: View {
                 }
             case .video:
                 if let jpeg {
-                    VideoView(data: jpeg)
+                    MediaPlayerView(data: jpeg, ext: "mp4", autoplay: true)
                 } else {
                     Theme.secondary
                 }
@@ -24,7 +25,7 @@ struct ProofMediaView: View {
                 VStack(spacing: 4) {
                     Text("♪").displayFont(22).foregroundStyle(Theme.summit)
                     if let jpeg {
-                        AudioProofView(data: jpeg)
+                        MediaPlayerView(data: jpeg, ext: "m4a", autoplay: false)
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -34,33 +35,28 @@ struct ProofMediaView: View {
     }
 }
 
-private struct VideoView: View {
+/// Writes media bytes to a temp file and plays them with `AVPlayer`
+private struct MediaPlayerView: View {
     let data: Data
+    let ext: String         // file extension (mp4 or m4a)
+    var autoplay = false    // for automatic playback when visible
+
     @State private var player: AVPlayer?
 
     var body: some View {
         VideoPlayer(player: player)
-            .onAppear {
-                let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".mp4")
-                try? data.write(to: url)
-                let p = AVPlayer(url: url)
-                player = p
-                p.play()
-            }
+            .onAppear(perform: setupPlayer)
+            .onDisappear { player?.pause() }
     }
-}
 
-private struct AudioProofView: View {
-    let data: Data
-    @State private var player: AVPlayer?
-
-    var body: some View {
-        VideoPlayer(player: player)
-            .frame(height: 44)
-            .onAppear {
-                let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".m4a")
-                try? data.write(to: url)
-                player = AVPlayer(url: url)
-            }
+    /// Creates a temporary file for `data` and prepares the `AVPlayer`
+    private func setupPlayer() {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).\(ext)")
+        try? data.write(to: url)
+        let newPlayer = AVPlayer(url: url)
+        player = newPlayer
+        if autoplay {
+            newPlayer.play()
+        }
     }
 }

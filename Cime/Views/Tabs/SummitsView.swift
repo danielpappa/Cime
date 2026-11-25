@@ -1,5 +1,6 @@
 import SwiftUI
 
+/// Vertical snap-scrolling feed displaying the user's daily goal summits and their friends' summits
 struct SummitsView: View {
     @Environment(CimeStore.self) private var store
     @State private var interactions = SummitInteractions()       // real reactions + comments
@@ -9,7 +10,7 @@ struct SummitsView: View {
     @State private var focusedID: String?
     private let cardGap: CGFloat = 12
 
-    /// Your header sits close under the toolbar via a negative inset; kept as a named value.
+    /// Header sits close under the toolbar via a negative inset
     private let topPull: CGFloat = -38
 
     /// How many of MY peaks are reached. Friend slide N unlocks once I've reached N.
