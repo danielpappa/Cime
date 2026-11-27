@@ -1,6 +1,7 @@
 import SwiftUI
 import UIKit
 
+/// Round profile picture. Fallback is first letter of the name
 struct AvatarView: View {
     var jpeg: Data? = nil
     var url: URL? = nil
@@ -12,11 +13,11 @@ struct AvatarView: View {
             if let jpeg, let ui = UIImage(data: jpeg) {
                 Image(uiImage: ui).resizable().scaledToFill()
             } else if let url {
-                AsyncImage(url: url) { phase in
+                AsyncImage(url: url) { phase in           // AsyncImage downloads the image for us
                     if let image = phase.image {
                         image.resizable().scaledToFill()
                     } else {
-                        initial
+                        initial                           // shown while loading or on failure
                     }
                 }
             } else {
@@ -33,6 +34,7 @@ struct AvatarView: View {
     }
 }
 
+/// Square thumbnail for a goal's proof
 struct ProofThumb: View {
     @Environment(CimeStore.self) private var store
     let goal: Goal
@@ -55,6 +57,7 @@ struct ProofThumb: View {
             }
         }
         .task(id: goal.proofPath) {
+            url = nil
             guard goal.proofJPEG == nil, let path = goal.proofPath else { return }
             url = await store.proofURL(path: path)
         }
@@ -70,12 +73,13 @@ struct ProofThumb: View {
 }
 
 extension Data {
-    func jpegDownscaled(maxSide: CGFloat = 1024, quality: CGFloat = 0.8) -> Data? {
+    /// Shrinks image data so the longest side is at most `maxSide` points and re-encodes it as JPEG
+    nonisolated func jpegDownscaled(maxSide: CGFloat = 1024, quality: CGFloat = 0.8) -> Data? {
         guard let image = UIImage(data: self) else { return nil }
         let scale = Swift.min(1, maxSide / Swift.max(image.size.width, image.size.height))
         let size = CGSize(width: image.size.width * scale, height: image.size.height * scale)
         let format = UIGraphicsImageRendererFormat.default()
-        format.scale = 1
+        format.scale = 1                                  // 1 pixel per point, otherwise it renders 2–3x bigger
         let resized = UIGraphicsImageRenderer(size: size, format: format).image { _ in
             image.draw(in: CGRect(origin: .zero, size: size))
         }
