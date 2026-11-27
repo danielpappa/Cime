@@ -2,7 +2,7 @@ import CoreGraphics
 import Foundation
 import UIKit
 
-enum ProofValidator {
+nonisolated enum ProofValidator {
     static func checkProof(pixels: [UInt8], bytesPerPixel: Int = 4) -> (ok: Bool, reason: String?) {
         var sum = 0.0
         var sumSq = 0.0

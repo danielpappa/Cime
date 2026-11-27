@@ -1,327 +1,313 @@
+///  Logic behind LiveCameraView: permissions, taking a photo, recording video or a voice note,
+///  checking the result and holding it until the user confirms.
+
 import AVFoundation
 import Observation
 import UIKit
 
-/// Manages camera, microphone, and voice note capturing for proving daily climbing goals
+/// View model for the live proof camera. Main actor only; the heavy camera work happens
+/// on the queue inside `CameraSessionController`
 @MainActor
 @Observable
 final class CameraModel: NSObject {
-    var errorMessage: String?                       // user facing validation/error message
-    var isChecking = false                          // true while media is being compressed, validated or checked
-    var isRecording = false                         // true when actively recording audio or video
-    var recordingElapsed = 0                        // elapsed recording time in seconds
-    var audioLevel: CGFloat = 0                     // normalized microphone level
-    
-    private var audioRecorder: AVAudioRecorder?
-    private var audioURL: URL?
-    private var meterTimer: Timer?
-    private var voiceDuration: TimeInterval = 0
-    
-    var mode: ProofKind = .photo
-    var useFrontCamera = false
 
-    /// Underlying capture session accessed from `CameraSessionQueue`
-    nonisolated(unsafe) let session = AVCaptureSession()
-    private let photoOutput = AVCapturePhotoOutput()
-    private let movieOutput = AVCaptureMovieFileOutput()
-    private var videoInput: AVCaptureDeviceInput?
-    private var audioInput: AVCaptureDeviceInput?
-    private var recordingURL: URL?
-    private var recordingTimer: Timer?
-    private var peakAudio: Float = 0
-    private var onProof: ((Data, ProofKind) -> Void)?
-    
-    /// Captured proof waiting for confirmation before saving
-    struct PendingProof {
+    /// A captured proof waiting for the user to confirm or retake
+    struct PendingProof: Equatable {
         let data: Data
         let kind: ProofKind
     }
 
-    /// Proof ready to confirm or retake
-    var pending: PendingProof?
-
-    /// Permission requests for camera and mic
-    func configure() async {
-        let videoGranted = await Self.requestAccess(for: .video)
-        let audioGranted = await Self.requestAccess(for: .audio)
-        guard videoGranted || mode == .audio else {
-            errorMessage = "Camera access is needed — proof must be captured live."
-            return
-        }
-        if mode == .video || mode == .audio {
-            guard audioGranted else {
-                errorMessage = "Microphone access is needed — proof must be recorded live."
-                return
-            }
-        }
-        rebuildSession()
+    /// What the screen is doing right now
+    enum Phase: Equatable {
+        case idle
+        case recording
+        case checking                    // compressing / validating
+        case review(PendingProof)
     }
 
-    /// Switches capture mode
-    func setMode(_ mode: ProofKind) {
+    // MARK: State the view reads
+
+    private(set) var phase: Phase = .idle
+    private(set) var mode: ProofKind = .photo
+    private(set) var useFrontCamera = false
+    var errorMessage: String?            // user facing, shown in a red box
+
+    var isRecording: Bool { phase == .recording }
+    var isChecking: Bool { phase == .checking }
+    var pending: PendingProof? {
+        if case .review(let proof) = phase { return proof }   // pull the value out of the enum case
+        return nil
+    }
+    var recordingElapsed: Int { mode == .audio ? voice.elapsed : videoElapsed }
+    var audioLevel: CGFloat { voice.level }
+    var session: AVCaptureSession { controller.session }
+
+    // MARK: Private
+
+    private let controller = CameraSessionController()
+    private let voice = VoiceRecorder()
+    private var videoElapsed = 0
+    private var videoTimer: Timer?
+    private var configTask: Task<Void, Never>?
+    private var interruptionTask: Task<Void, Never>?
+    private var onProof: ((Data, ProofKind) -> Void)?
+
+    init(mode: ProofKind = .photo) {
+        super.init()
         self.mode = mode
-        Task { await configure() }
+        voice.onFinish = { [weak self] outcome in self?.handleVoice(outcome) }   // weak = no retain cycle
     }
 
-    /// Toggles between front and back camera
-    func flipCamera() {
-        useFrontCamera.toggle()
-        rebuildSession()
-    }
+    // MARK: Setup
 
-    /// Registers the callback invoked when the user confirms a captured proof
+    /// Registers the callback that receives the proof
     func bind(onProof: @escaping (Data, ProofKind) -> Void) {
         self.onProof = onProof
     }
 
-    /// Takes a photo or starts/stops recording depending on the current `mode`
+    /// Asks for only the permissions the current mode needs, then (re)starts the camera
+    func configure() async {
+        errorMessage = nil
+        observeInterruptions()
+
+        let needsCamera = mode != .audio
+        let needsMic = mode != .photo
+        if needsCamera {
+            let granted = await Self.requestAccess(for: .video)
+            if !granted { errorMessage = "Camera access is needed — proof must be captured live."; return }
+        }
+        if needsMic {
+            let granted = await Self.requestAccess(for: .audio)
+            if !granted { errorMessage = "Microphone access is needed — proof must be recorded live."; return }
+        }
+        guard !Task.isCancelled else { return }       // the user may have switched mode meanwhile
+
+        switch mode {
+        case .photo: controller.configure(for: .photo, useFront: useFrontCamera, maxVideoSeconds: 0)
+        case .video: controller.configure(for: .video, useFront: useFrontCamera, maxVideoSeconds: mode.recordLimitSeconds)
+        case .audio: controller.stop()                // voice notes don't need the camera
+        }
+    }
+
+    /// Switches photo / video / audio
+    func setMode(_ newMode: ProofKind) {
+        guard phase == .idle, newMode != mode else { return }
+        mode = newMode
+        reconfigure()
+    }
+
+    func flipCamera() {
+        guard phase == .idle else { return }
+        useFrontCamera.toggle()
+        reconfigure()
+    }
+
+    // MARK: Capturing
+
+    /// The big round button: photo mode takes a photo, other modes start/stop recording
     func captureOrToggleRecord() {
         switch mode {
-        case .photo:
-            capturePhoto()
-        default:
-            isRecording ? stopRecording() : startRecording()
+        case .photo: takePhoto()
+        case .video, .audio: isRecording ? stopRecording() : startRecording()
         }
     }
-    
-    /// Confirms `pending` proof
+
+    /// The user accepted the proof
     func confirm() {
-        guard let p = pending else { return }
-        pending = nil
-        onProof?(p.data, p.kind)          // the store uploads on its next sync
+        guard let proof = pending else { return }
+        phase = .idle
+        onProof?(proof.data, proof.kind)
     }
 
-    /// Clears pending proof and error state so the user can capture again
+    /// Throws the proof away and goes back to the camera
     func retake() {
-        pending = nil
+        phase = .idle
         errorMessage = nil
+        if mode != .audio { controller.start() }
     }
 
-    /// Stops sessions and cleans up files
+    // MARK: Lifecycle
+
+    /// Pauses everything
+    func suspend() {
+        configTask?.cancel()
+        stopVideoTimer()
+        voice.cancel()
+        if phase == .recording {
+            if mode != .audio { controller.stopMovie() }
+            phase = .idle                    // the movie delegate sees .idle and drops the file
+        }
+        controller.stop()
+    }
+
+    /// Restarts the camera after `suspend()`
+    func resume() {
+        if case .review = phase { return }
+        reconfigure()
+    }
+
+    /// Full cleanup when leaving the screen
     func stopSession() {
-        stopTimers()
-        CameraSessionQueue.stopRunning(session)
-        if let url = audioURL {                     // abandon an unfinished voice note quietly
-            audioURL = nil
-            try? FileManager.default.removeItem(at: url)
-        }
-        audioRecorder?.stop()
+        suspend()
+        interruptionTask?.cancel()
+        interruptionTask = nil
+        phase = .idle                        // pending results from late callbacks get ignored
     }
 
-    private func stopTimers() {
-        recordingTimer?.invalidate()
-        recordingTimer = nil
-        meterTimer?.invalidate()
-        meterTimer = nil
+    // MARK: - Private helpers
+
+    /// Cancels any older configure call so quick taps don't stack up
+    private func reconfigure() {
+        configTask?.cancel()
+        configTask = Task { await configure() }
     }
 
-    private func capturePhoto() {
-        guard photoOutput.connection(with: .video) != nil else {
-            errorMessage = "Camera isn't ready yet."; return
+    private func takePhoto() {
+        guard phase == .idle else { return }
+        errorMessage = nil
+        phase = .checking
+        controller.capturePhoto(delegate: self) { [weak self] in
+            Task { @MainActor [weak self] in self?.fail("Camera isn't ready yet.") }
         }
-        isChecking = true
-        photoOutput.capturePhoto(with: AVCapturePhotoSettings(), delegate: self)
     }
 
     private func startRecording() {
-        if mode == .audio { startVoiceRecording(); return }
-        guard !movieOutput.isRecording else { return }
-        peakAudio = 0
-        recordingElapsed = 1
+        guard phase == .idle else { return }
+        errorMessage = nil
+
+        if mode == .audio {
+            if voice.start(limit: mode.recordLimitSeconds) { phase = .recording }
+            else { errorMessage = "Couldn't start recording." }
+            return
+        }
+
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".mov")
-        recordingURL = url
-        movieOutput.startRecording(to: url, recordingDelegate: self)
-        isRecording = true
-        recordingTimer?.invalidate()
-        recordingTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            guard let self else { return }
+        videoElapsed = 0
+        phase = .recording
+        controller.startMovie(to: url, delegate: self) { [weak self] in
+            Task { @MainActor [weak self] in self?.fail("Camera isn't ready yet.") }
+        }
+        // The timer only updates the label. The movie output stops itself at the time limit.
+        videoTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
-                guard let self, self.isRecording else { return }
-                self.recordingElapsed += 1
-                if self.recordingElapsed > self.mode.recordLimitSeconds + 1 {
-                    self.stopRecording()
-                }
+                guard let self, self.phase == .recording else { return }
+                self.videoElapsed += 1
             }
         }
     }
 
+    /// Locks the UI right away (phase = .checking) so the mode can't change while the file finishes
     private func stopRecording() {
-        if mode == .audio { stopVoiceRecording(); return }
-        guard movieOutput.isRecording else { return }
-        movieOutput.stopRecording()
-        recordingTimer?.invalidate()
-        recordingTimer = nil
-        isRecording = false
-        recordingElapsed = 0
-        audioLevel = 0
+        guard phase == .recording else { return }
+        phase = .checking
+        stopVideoTimer()
+        if mode == .audio { voice.stop() } else { controller.stopMovie() }
     }
 
-    private func rebuildSession() {
-        guard mode != .audio else { CameraSessionQueue.stopRunning(session); return }
-        session.beginConfiguration()
-        session.sessionPreset = .high
-        for input in session.inputs { session.removeInput(input) }
-        for output in session.outputs { session.removeOutput(output) }
+    private func stopVideoTimer() {
+        videoTimer?.invalidate()
+        videoTimer = nil
+    }
 
-        let wantVideo = mode != .audio
-        if wantVideo, let device = cameraDevice(front: useFrontCamera) {
-            if let input = try? AVCaptureDeviceInput(device: device), session.canAddInput(input) {
-                videoInput = input
-                session.addInput(input)
+    /// Shows an error and goes back to idle.
+    private func fail(_ message: String?) {
+        stopVideoTimer()
+        errorMessage = message
+        phase = .idle
+    }
+
+    /// Checks the captured media, then moves to the review phase
+    private func verifyAndDeliver(data: Data, kind: ProofKind, frameJPEG: Data?) {
+        phase = .checking
+        Task {
+            try? await Task.sleep(for: .milliseconds(300))        // short pause so "Verifying…" is visible
+            if kind != .audio {
+                let jpeg = frameJPEG ?? data
+                // Run the check off the main thread. ProofValidator.checkJPEG must be `nonisolated`.
+                let result = await Task.detached(priority: .userInitiated) { ProofValidator.checkJPEG(jpeg) }.value
+                guard phase == .checking else { return }          // screen was closed meanwhile
+                if !result.ok { fail(result.reason); return }
+            }
+            guard phase == .checking else { return }
+            errorMessage = nil
+            phase = .review(PendingProof(data: data, kind: kind))
+            controller.stop()                                     // no need to run the camera behind the review
+        }
+    }
+
+    /// Compresses a finished video and sends it into the check
+    private func processRecording(_ url: URL, error: Error?) async {
+        defer { try? FileManager.default.removeItem(at: url) }    // runs on every exit path: no leaked .mov
+        guard phase == .recording || phase == .checking else { return }   // cancelled or screen closed
+        stopVideoTimer()
+        phase = .checking
+
+        // Hitting the max duration reports an "error" but still saved the file fine.
+        if let error, (error as NSError).userInfo[AVErrorRecordingSuccessfullyFinishedKey] as? Bool != true {
+            fail("Recording failed. Try again.")
+            return
+        }
+        do {
+            let frame = await ProofCompressor.firstFrameJPEG(url)
+            let data = try await ProofCompressor.compress(url, kind: .video)
+            guard phase == .checking else { return }
+            verifyAndDeliver(data: data, kind: .video, frameJPEG: frame)
+        } catch {
+            fail("Couldn't process the recording.")
+        }
+    }
+
+    /// Result from the voice recorder
+    private func handleVoice(_ outcome: VoiceRecorder.Outcome) {
+        guard phase == .recording || phase == .checking else { return }
+        switch outcome {
+        case .recorded(let data, let peak):
+            if peak < 12 {                    // 12 is about -44 dB; normal speech peaks at 40–70
+                fail("We couldn't hear anything. Say what you did.")
+            } else {
+                verifyAndDeliver(data: data, kind: .audio, frameJPEG: nil)   // already AAC, no re-encode
+            }
+        case .tooShort: fail("Too short. Say a bit more.")
+        case .failed: fail("Recording failed. Try again.")
+        }
+    }
+
+    /// Stops a recording if the camera gets interrupted (phone call, another app takes the camera)
+    private func observeInterruptions() {
+        guard interruptionTask == nil else { return }
+        interruptionTask = Task { [weak self] in
+            for await _ in NotificationCenter.default.notifications(named: AVCaptureSession.wasInterruptedNotification) {
+                self?.stopRecording()
             }
         }
-        if mode == .video,
-           let mic = AVCaptureDevice.default(for: .audio),
-           let input = try? AVCaptureDeviceInput(device: mic),
-           session.canAddInput(input) {
-            audioInput = input
-            session.addInput(input)
-        }
-
-        if wantVideo, session.canAddOutput(photoOutput) { session.addOutput(photoOutput) }
-        if mode != .photo, session.canAddOutput(movieOutput) { session.addOutput(movieOutput) }
-
-        session.commitConfiguration()
-        CameraSessionQueue.startRunning(session)
-    }
-
-    private func cameraDevice(front: Bool) -> AVCaptureDevice? {
-        AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: front ? .front : .back)
     }
 
     private static func requestAccess(for media: AVMediaType) async -> Bool {
         switch AVCaptureDevice.authorizationStatus(for: media) {
         case .authorized: true
         case .notDetermined:
+            // Turns the old callback style into async/await.
             await withCheckedContinuation { cont in
                 AVCaptureDevice.requestAccess(for: media) { cont.resume(returning: $0) }
             }
         default: false
         }
     }
-
-    private func verifyAndDeliver(data: Data, kind: ProofKind, frameJPEG: Data?) {
-        isChecking = true
-        Task {
-            try? await Task.sleep(for: .milliseconds(300))
-            if kind == .photo || kind == .video {
-                let result = ProofValidator.checkJPEG(frameJPEG ?? data)
-                if !result.ok { errorMessage = result.reason; isChecking = false; return }
-            }
-            if kind == .audio, peakAudio < 12 {          // 12 ≈ -44 dB; normal speech peaks at 40–70
-                errorMessage = "We couldn't hear anything. Say what you did."
-                isChecking = false
-                return
-            }
-            errorMessage = nil
-            isChecking = false
-            pending = PendingProof(data: data, kind: kind)
-        }
-    }
-    
-    private func processRecording(_ url: URL, error: Error?) async {
-        if let error, (error as NSError).userInfo[AVErrorRecordingSuccessfullyFinishedKey] as? Bool != true {
-            errorMessage = "Recording failed. Try again."
-            return
-        }
-        isChecking = true
-        let kind = mode
-        do {
-            let frame = kind == .video ? await ProofCompressor.firstFrameJPEG(url) : nil   // fixes validation
-            let data = try await ProofCompressor.compress(url, kind: kind)
-            verifyAndDeliver(data: data, kind: kind, frameJPEG: frame)
-        } catch {
-            errorMessage = "Couldn't process the recording."
-            isChecking = false
-        }
-    }
-    
-    private func startVoiceRecording() {
-        do {
-            let audioSession = AVAudioSession.sharedInstance()
-            try audioSession.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker])
-            try audioSession.setActive(true)
-
-            let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".m4a")
-            let recorder = try AVAudioRecorder(url: url, settings: [
-                AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
-                AVSampleRateKey: 22_050,
-                AVNumberOfChannelsKey: 1,
-                AVEncoderBitRateKey: 48_000            // ~350 KB for 30 s
-            ])
-            recorder.delegate = self
-            recorder.isMeteringEnabled = true
-            guard recorder.record() else { errorMessage = "Couldn't start recording."; return }
-
-            audioRecorder = recorder
-            audioURL = url
-            peakAudio = 0
-            recordingElapsed = 0
-            isRecording = true
-            meterTimer?.invalidate()
-            meterTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
-                Task { @MainActor [weak self] in self?.tickVoice() }
-            }
-        } catch {
-            errorMessage = "Couldn't start recording."
-        }
-    }
-
-    private func tickVoice() {
-        guard let recorder = audioRecorder, recorder.isRecording else { return }
-        recorder.updateMeters()
-        let level = max(0, min(1, (recorder.averagePower(forChannel: 0) + 50) / 50))   // -50…0 dB → 0…1
-        audioLevel = CGFloat(level)                       // drives the meter bars
-        peakAudio = max(peakAudio, level * 100)
-        recordingElapsed = Int(recorder.currentTime)
-        if recordingElapsed >= mode.recordLimitSeconds { stopVoiceRecording() }
-    }
-
-    private func stopVoiceRecording() {
-        voiceDuration = audioRecorder?.currentTime ?? 0
-        meterTimer?.invalidate(); meterTimer = nil
-        audioRecorder?.stop()                             // calls the delegate below
-        isRecording = false
-        recordingElapsed = 0
-        audioLevel = 0
-    }
-
-    private func finishVoice(success: Bool) {
-        defer {
-            audioRecorder = nil
-            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-        }
-        guard let url = audioURL else { return }
-        audioURL = nil
-        guard success, voiceDuration >= 1,
-              let data = try? Data(contentsOf: url) else {
-            errorMessage = voiceDuration < 1 ? "Too short. Say a bit more." : "Recording failed. Try again."
-            try? FileManager.default.removeItem(at: url)
-            return
-        }
-        try? FileManager.default.removeItem(at: url)
-        isChecking = true
-        verifyAndDeliver(data: data, kind: .audio, frameJPEG: nil)    // already AAC .m4a: no re-encode
-    }
 }
 
-extension CameraModel: AVAudioRecorderDelegate {
-    nonisolated func audioRecorderDidFinishRecording(_ recorder: AVAudioRecorder, successfully flag: Bool) {
-        Task { @MainActor in finishVoice(success: flag) }
-    }
-}
+// MARK: - AVFoundation delegates
+// These are called on background threads, so they are `nonisolated` and hop back with Task { @MainActor }.
 
 extension CameraModel: AVCapturePhotoCaptureDelegate {
     nonisolated func photoOutput(_ output: AVCapturePhotoOutput,
                                  didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
-        let data = photo.fileDataRepresentation()
+        // Shrink the photo here on the background thread (UIImage.draw keeps the orientation)
+        let small = error == nil
+            ? photo.fileDataRepresentation()?.jpegDownscaled(maxSide: 1080, quality: 0.8)
+            : nil
         Task { @MainActor in
-            // ~150–300 KB instead of 2–3 MB; also normalizes HEIC to JPEG
-            guard error == nil, let data, let small = data.jpegDownscaled(maxSide: 1080, quality: 0.8) else {
-                errorMessage = "Couldn't take the photo. Try again."
-                isChecking = false
-                return
-            }
+            guard phase == .checking else { return }
+            guard let small else { fail("Couldn't take the photo. Try again."); return }
             verifyAndDeliver(data: small, kind: .photo, frameJPEG: small)
         }
     }
